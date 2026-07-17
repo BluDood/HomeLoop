@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_background">
+
+    <ImageView
+        android:id="@+id/widget_frame"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@string/widget_frame_description"
+        android:scaleType="centerCrop"
+        android:src="@drawable/ic_launcher_foreground" />
+
+    <ImageView
+        android:id="@+id/widget_feedback_icon"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:layout_gravity="center"
+        android:contentDescription="@string/widget_feedback_description"
+        android:src="@drawable/widget_feedback_play"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/widget_status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|start"
+        android:layout_margin="10dp"
+        android:background="@drawable/widget_status_background"
+        android:ellipsize="end"
+        android:maxLines="2"
+        android:paddingHorizontal="9dp"
+        android:paddingVertical="5dp"
+        android:text="@string/widget_initial_status"
+        android:textColor="#FFFFFFFF"
+        android:textSize="12sp" />
+</FrameLayout>

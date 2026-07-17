@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">HomeLoop</string>
+    <string name="widget_description">Loop a selected local video on your home screen</string>
+    <string name="channel_name">HomeLoop playback</string>
+    <string name="channel_description">Keeps HomeLoop video frames updating on the home-screen widget</string>
+    <string name="stop_decoder">Stop</string>
+    <string name="widget_frame_description">Current video frame</string>
+    <string name="widget_initial_status">Open the app to choose a video</string>
+    <string name="widget_feedback_description">Playback status</string>
+</resources>
