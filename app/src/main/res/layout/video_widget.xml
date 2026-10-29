@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/widget_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -21,6 +22,44 @@
         android:contentDescription="@string/widget_feedback_description"
         android:src="@drawable/widget_feedback_play"
         android:visibility="gone" />
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:animateLayoutChanges="true"
+        tools:ignore="UselessParent">
+
+        <LinearLayout
+            android:id="@+id/widget_controls"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#66000000"
+            android:contentDescription="@string/widget_hide_controls"
+            android:gravity="center"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <ImageButton
+                android:id="@+id/widget_control_play"
+                style="@style/WidgetControl"
+                android:contentDescription="@string/widget_pause"
+                android:src="@drawable/ic_widget_pause" />
+
+            <ImageButton
+                android:id="@+id/widget_control_mute"
+                style="@style/WidgetControl"
+                android:layout_marginStart="8dp"
+                android:contentDescription="@string/widget_mute"
+                android:src="@drawable/ic_widget_volume" />
+
+            <ImageButton
+                android:id="@+id/widget_control_fullscreen"
+                style="@style/WidgetControl"
+                android:layout_marginStart="8dp"
+                android:contentDescription="@string/widget_full_screen"
+                android:src="@drawable/ms_fullscreen_24" />
+        </LinearLayout>
+    </FrameLayout>
 
     <TextView
         android:id="@+id/widget_status"

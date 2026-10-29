@@ -9,7 +9,9 @@ Video widgets for your home screen!
 - Optimize video for the chosen parameters for better performance
 - Large videos, even movies (multiple hours / multiple GB), are supported with little overhead
 - Control playback from the widget
-- Advanced view to adjust scaling filters, crop, trim, and show diagnostics
+- Trim the loop and crop the frame with a live preview, and seek the loop from Home
+- Open a full-screen view of the live video
+- Advanced page for quality, scaling filters, background behavior, theme, haptics and diagnostics
 
 ## AI Disclosure
 

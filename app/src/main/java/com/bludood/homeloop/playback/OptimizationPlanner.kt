@@ -58,7 +58,7 @@ object OptimizationPlanner {
         if (profile == null) return OptimizationRecommendation(false, emptyList())
         val diagnostics = snapshot.inputDiagnostics
         val visiblePixels = snapshot.cropInsets.remainingWidth(snapshot.videoWidth).toLong() *
-            snapshot.cropInsets.remainingHeight(snapshot.videoHeight)
+                snapshot.cropInsets.remainingHeight(snapshot.videoHeight)
         val outputPixels = profile.outputWidth.toLong() * profile.outputHeight
         val reasons = buildList {
             if (visiblePixels > outputPixels * 2L) add("Source resolution is much larger than the widget")
@@ -73,19 +73,12 @@ object OptimizationPlanner {
         return OptimizationRecommendation(reasons.isNotEmpty(), reasons)
     }
 
-    fun effectiveFps(snapshot: PlaybackSnapshot): Float {
-        val requested = snapshot.frameRate.fixedFps?.toFloat()
-            ?: if (snapshot.sourceFrameRate > 0f) {
-            snapshot.sourceFrameRate / requireNotNull(snapshot.frameRate.sourceDivisor)
+    fun effectiveFps(snapshot: PlaybackSnapshot): Float =
+        if (snapshot.sourceFrameRate > 0f) {
+            snapshot.sourceFrameRate / snapshot.frameRate.sourceDivisor
         } else {
             FALLBACK_FPS
         }
-        return if (snapshot.sourceFrameRate > 0f) {
-            minOf(requested, snapshot.sourceFrameRate)
-        } else {
-            requested
-        }
-    }
 
     fun combinedCrop(snapshot: PlaybackSnapshot, profile: OptimizationProfile): CropInsets {
         val safe = snapshot.cropInsets.clamped(snapshot.videoWidth, snapshot.videoHeight)

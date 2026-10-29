@@ -57,7 +57,6 @@ class WidgetFramePublisher(context: Context) {
     }
 
     companion object {
-        // Keep only a short hand-off window for the launcher instead of retaining dozens of HD frames.
         private const val RETAINED_BITMAP_COUNT = 3
         private const val MAX_CONSECUTIVE_FAILURES = 3
         private const val TAG = "WidgetFramePublisher"

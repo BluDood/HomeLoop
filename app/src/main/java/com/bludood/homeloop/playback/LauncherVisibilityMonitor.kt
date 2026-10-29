@@ -9,11 +9,6 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Process
 
-/**
- * Best-effort foreground-launcher detection. Android does not expose live AppWidgetHostView
- * visibility to widget providers, so this deliberately fails open when Usage Access or launcher
- * information is unavailable.
- */
 class LauncherVisibilityMonitor(context: Context) {
     private val appContext = context.applicationContext
     private val usageStatsManager = appContext.getSystemService(UsageStatsManager::class.java)
@@ -59,6 +54,7 @@ class LauncherVisibilityMonitor(context: Context) {
 
         fun hasUsageAccess(context: Context): Boolean {
             val appOps = context.getSystemService(AppOpsManager::class.java) ?: return false
+
             @Suppress("DEPRECATION")
             val mode = appOps.unsafeCheckOpNoThrow(
                 AppOpsManager.OPSTR_GET_USAGE_STATS,
@@ -77,7 +73,10 @@ class LauncherVisibilityMonitor(context: Context) {
                 )
             } else {
                 @Suppress("DEPRECATION")
-                context.packageManager.resolveActivity(homeIntent, PackageManager.MATCH_DEFAULT_ONLY)
+                context.packageManager.resolveActivity(
+                    homeIntent,
+                    PackageManager.MATCH_DEFAULT_ONLY
+                )
             }
             return resolved?.activityInfo?.packageName
                 ?.takeUnless { it == "android" }

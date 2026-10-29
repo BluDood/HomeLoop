@@ -108,7 +108,10 @@ internal class CodecOutputSurface(
                     frameLock.wait(remaining)
                 } catch (exception: InterruptedException) {
                     Thread.currentThread().interrupt()
-                    throw IllegalStateException("Interrupted while waiting for a decoded frame", exception)
+                    throw IllegalStateException(
+                        "Interrupted while waiting for a decoded frame",
+                        exception
+                    )
                 }
             }
             frameAvailable = false

@@ -3,18 +3,17 @@ package com.bludood.homeloop.data
 import android.content.Context
 import androidx.core.content.edit
 
-enum class AppViewMode(val label: String) {
-    BASIC("Basic"),
-    ADVANCED("Advanced"),
+enum class ThemeChoice(val label: String) {
+    SYSTEM("System"),
+    LIGHT("Light"),
+    DARK("Dark"),
 }
 
-enum class AdvancedSection(val preferenceKey: String) {
-    RENDERING_OPTIONS("rendering_options"),
-    OPTIMIZATION("optimization"),
-    INPUT_DIAGNOSTICS("input_diagnostics"),
-    RUNTIME_DIAGNOSTICS("runtime_diagnostics"),
-    VIRTUAL_TIMELINE("virtual_timeline"),
-}
+data class AppSettings(
+    val theme: ThemeChoice = ThemeChoice.SYSTEM,
+    val dynamicColor: Boolean = false,
+    val hapticFeedback: Boolean = true,
+)
 
 class AppUiPreferences(context: Context) {
     private val preferences = context.applicationContext.getSharedPreferences(
@@ -22,28 +21,29 @@ class AppUiPreferences(context: Context) {
         Context.MODE_PRIVATE,
     )
 
-    fun viewMode(): AppViewMode = preferences.getString(KEY_VIEW_MODE, null)
-        ?.let { stored -> AppViewMode.entries.firstOrNull { it.name == stored } }
-        ?: AppViewMode.BASIC
-
-    fun setViewMode(mode: AppViewMode) {
-        preferences.edit { putString(KEY_VIEW_MODE, mode.name) }
+    fun settings(): AppSettings {
+        val defaults = AppSettings()
+        return AppSettings(
+            theme = preferences.getString(KEY_THEME, null)
+                ?.let { stored -> ThemeChoice.entries.firstOrNull { it.name == stored } }
+                ?: defaults.theme,
+            dynamicColor = preferences.getBoolean(KEY_DYNAMIC_COLOR, defaults.dynamicColor),
+            hapticFeedback = preferences.getBoolean(KEY_HAPTIC_FEEDBACK, defaults.hapticFeedback),
+        )
     }
 
-    fun isSectionExpanded(section: AdvancedSection): Boolean = preferences.getBoolean(
-        "$SECTION_EXPANDED_PREFIX${section.preferenceKey}",
-        true,
-    )
-
-    fun setSectionExpanded(section: AdvancedSection, expanded: Boolean) {
+    fun setSettings(settings: AppSettings) {
         preferences.edit {
-            putBoolean("$SECTION_EXPANDED_PREFIX${section.preferenceKey}", expanded)
+            putString(KEY_THEME, settings.theme.name)
+            putBoolean(KEY_DYNAMIC_COLOR, settings.dynamicColor)
+            putBoolean(KEY_HAPTIC_FEEDBACK, settings.hapticFeedback)
         }
     }
 
     private companion object {
         const val PREFERENCES_NAME = "video_widget_ui"
-        const val KEY_VIEW_MODE = "view_mode"
-        const val SECTION_EXPANDED_PREFIX = "section_expanded_"
+        const val KEY_THEME = "theme"
+        const val KEY_DYNAMIC_COLOR = "dynamic_color"
+        const val KEY_HAPTIC_FEEDBACK = "haptic_feedback"
     }
 }

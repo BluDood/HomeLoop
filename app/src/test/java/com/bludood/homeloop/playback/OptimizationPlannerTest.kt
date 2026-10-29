@@ -30,7 +30,7 @@ class OptimizationPlannerTest {
     fun optimizationNeverInventsFramesAboveTheSourceCadence() {
         val snapshot = snapshot().copy(
             sourceFrameRate = 23.976f,
-            frameRate = PlaybackOptions.fixedFrameRate(60),
+            frameRate = PlaybackOptions.defaultFrameRate,
         )
 
         assertEquals(23.976f, OptimizationPlanner.effectiveFps(snapshot), 0.0001f)

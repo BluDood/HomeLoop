@@ -1,31 +1,13 @@
 package com.bludood.homeloop.data
 
-data class ResolutionOption(
-    val width: Int,
-    val height: Int,
-    val description: String,
-    val autoScalePercent: Int? = null,
-) {
-    val isAuto: Boolean get() = autoScalePercent != null
-    val label: String get() = if (isAuto) {
-        "$autoScalePercent%"
-    } else {
-        "$width × $height"
-    }
+data class ResolutionOption(val autoScalePercent: Int, val description: String) {
+    val label: String get() = "$autoScalePercent%"
 }
 
-data class FrameRateOption(
-    val id: String,
-    val label: String,
-    val fixedFps: Int? = null,
-    val sourceDivisor: Int? = null,
-) {
-    val isSourceBased: Boolean get() = sourceDivisor != null
-
+data class FrameRateOption(val id: String, val label: String, val sourceDivisor: Int) {
     fun displayLabel(sourceFps: Float): String {
-        if (!isSourceBased || sourceFps <= 0f) return label
-        val effective = sourceFps / requireNotNull(sourceDivisor)
-        return "$label · ${"%.3f".format(effective)} FPS"
+        if (sourceFps <= 0f) return label
+        return "$label · ${"%.3f".format(sourceFps / sourceDivisor)} FPS"
     }
 }
 
@@ -37,28 +19,21 @@ object PlaybackOptions {
         FrameRateOption("source_12_5", "1/8", sourceDivisor = 8),
     )
     val resolutions = listOf(
-        ResolutionOption(0, 0, "Pixel-correct Auto size", 100),
-        ResolutionOption(0, 0, "75% of Auto dimensions", 75),
-        ResolutionOption(0, 0, "50% of Auto dimensions", 50),
-        ResolutionOption(0, 0, "25% of Auto dimensions", 25),
+        ResolutionOption(100, "Pixel-correct Auto size"),
+        ResolutionOption(75, "75% of Auto dimensions"),
+        ResolutionOption(50, "50% of Auto dimensions"),
+        ResolutionOption(25, "25% of Auto dimensions"),
     )
     val defaultFrameRate = frameRates.first()
     val defaultResolution = resolutions.first()
-    val optimizedFrameRate = FrameRateOption(
-        id = "optimized_source",
-        label = "Optimized cadence",
-        sourceDivisor = 1,
-    )
-
-    fun fixedFrameRate(fps: Int): FrameRateOption = frameRates.firstOrNull {
-        it.fixedFps == fps
-    } ?: defaultFrameRate
 }
 
 enum class WidgetTapAction(val label: String, val description: String) {
+    SHOW_CONTROLS("Show controls", "Tap the widget to show play, mute and full screen controls"),
     TOGGLE_PLAYBACK("Pause / resume", "Tap the widget to pause or resume playback"),
     TOGGLE_MUTE("Mute / unmute", "Tap the widget to toggle audio"),
     OPEN_APP("Open the app", "Tap the widget to open this screen"),
+    OPEN_PLAYER("Play full screen", "Tap the widget to watch from the same moment in full screen"),
 }
 
 enum class RenderingPolicy(val label: String, val description: String) {
@@ -135,9 +110,10 @@ data class RuntimeDiagnostics(
     val sampleElapsedMs: Long = 0L,
     val active: Boolean = false,
 ) {
-    val missedPercent: Float get() = if (selectedFrames <= 0L) 0f else {
-        lateDroppedFrames * 100f / selectedFrames
-    }
+    val missedPercent: Float
+        get() = if (selectedFrames <= 0L) 0f else {
+            lateDroppedFrames * 100f / selectedFrames
+        }
 }
 
 data class OptimizationProfile(
@@ -167,6 +143,7 @@ data class OptimizationSnapshot(
     val outputPath: String? = null,
     val outputSizeBytes: Long = 0L,
     val profile: OptimizationProfile? = null,
+    val remainingMs: Long? = null,
 ) {
     val isUsable: Boolean get() = status == OptimizationStatus.READY && outputPath != null
 }
@@ -182,11 +159,12 @@ data class OptimizationRecommendation(
     val recommended: Boolean,
     val reasons: List<String>,
 ) {
-    val summary: String get() = when {
-        reasons.isEmpty() -> "The original already suits this widget setup"
-        recommended -> reasons.joinToString(separator = " · ")
-        else -> reasons.first()
-    }
+    val summary: String
+        get() = when {
+            reasons.isEmpty() -> "The original already suits this widget setup"
+            recommended -> reasons.joinToString(separator = " · ")
+            else -> reasons.first()
+        }
 }
 
 enum class PlaybackStatus {
@@ -195,7 +173,8 @@ enum class PlaybackStatus {
     RENDERING,
     SUSPENDED,
     PAUSED,
-    ERROR,
+    ERROR;
+    val isActive: Boolean get() = this == STARTING || this == RENDERING || this == SUSPENDED
 }
 
 data class PlaybackSnapshot(
@@ -225,8 +204,12 @@ data class PlaybackSnapshot(
     val statusDetail: String,
 ) {
     val hasVideo: Boolean get() = videoUri != null && durationMs > 0L
-    val sourcePositionMs: Long get() =
-        (trimStartMs + currentPositionMs).coerceIn(trimStartMs, (trimEndMs - 1L).coerceAtLeast(0L))
+    val sourcePositionMs: Long
+        get() =
+            (trimStartMs + currentPositionMs).coerceIn(
+                trimStartMs,
+                (trimEndMs - 1L).coerceAtLeast(0L)
+            )
 }
 
 object VirtualTimeline {
@@ -271,8 +254,6 @@ object VirtualTimeline {
 data class OutputSize(val width: Int, val height: Int) {
     val label: String get() = "$width × $height"
 }
-
-enum class CropEdge { TOP, RIGHT, BOTTOM, LEFT }
 
 data class CropInsets(
     val top: Int = 0,

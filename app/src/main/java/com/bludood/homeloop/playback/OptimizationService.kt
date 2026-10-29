@@ -38,6 +38,7 @@ import androidx.media3.transformer.Transformer
 import androidx.media3.transformer.VideoEncoderSettings
 import com.bludood.homeloop.MainActivity
 import com.bludood.homeloop.R
+import com.bludood.homeloop.data.CropInsets
 import com.bludood.homeloop.data.OptimizationProfile
 import com.bludood.homeloop.data.PlaybackRepository
 import com.bludood.homeloop.data.PlaybackSnapshot
@@ -73,7 +74,6 @@ class OptimizationService : Service() {
     private val progressPoll = object : Runnable {
         override fun run() {
             val activeTransformer = transformer ?: return
-            repository.touchOptimizationHeartbeat()
             val progressState = activeTransformer.getProgress(progressHolder)
             if (progressState == Transformer.PROGRESS_STATE_AVAILABLE) {
                 val progress = progressHolder.progress.coerceIn(0, 99)
@@ -87,6 +87,7 @@ class OptimizationService : Service() {
                 repository.updateOptimizationProgress(
                     progress,
                     "Encoding optimized copy · $progress% · $estimate",
+                    remainingMs,
                 )
                 updateNotification(progress, "$progress% · $estimate")
             }
@@ -96,6 +97,7 @@ class OptimizationService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        serviceAlive = true
         repository = PlaybackRepository(this)
         createNotificationChannel()
     }
@@ -106,13 +108,11 @@ class OptimizationService : Service() {
                 cancelOptimization("Optimization cancelled")
                 START_NOT_STICKY
             }
+
             else -> {
                 if (!running) {
                     runCatching(::prepareOptimization).onFailure { error ->
-                        failOptimization(
-                            "Could not start optimization: " +
-                                (error.message ?: error.javaClass.simpleName),
-                        )
+                        failOptimization("Could not start optimization: ${error.detail}")
                     }
                 }
                 START_NOT_STICKY
@@ -131,10 +131,7 @@ class OptimizationService : Service() {
             handler.post {
                 if (!running) return@post
                 runCatching(::startOptimization).onFailure { error ->
-                    failOptimization(
-                        "Could not start optimization: " +
-                            (error.message ?: error.javaClass.simpleName),
-                    )
+                    failOptimization("Could not start optimization: ${error.detail}")
                 }
             }
         }
@@ -155,7 +152,8 @@ class OptimizationService : Service() {
         val directory = File(filesDir, PlaybackRepository.OPTIMIZED_DIRECTORY).apply { mkdirs() }
         require(directory.isDirectory) { "The optimization folder could not be created" }
         savedOptimization = repository.savedOptimization(targetProfile)
-        val requiredBytes = OptimizationStoragePolicy.requiredFreeBytes(targetProfile.estimatedBytes)
+        val requiredBytes =
+            OptimizationStoragePolicy.requiredFreeBytes(targetProfile.estimatedBytes)
         if (!OptimizationStoragePolicy.hasEnoughSpace(
                 targetProfile.estimatedBytes,
                 allocatableBytes(directory),
@@ -163,7 +161,7 @@ class OptimizationService : Service() {
         ) {
             failOptimization(
                 "Not enough free storage. Keep at least ${formatBytes(requiredBytes)} available " +
-                    "for this optimization.",
+                        "for this optimization.",
             )
             return
         }
@@ -174,7 +172,7 @@ class OptimizationService : Service() {
         outputFile = finalFile
         temporaryFile = partialFile
         repository.markOptimizationRunning(targetProfile)
-        resumePlaybackAfterOptimization = shouldResumePlayback(snapshot)
+        resumePlaybackAfterOptimization = snapshot.hasVideo && snapshot.timelineRunning
         suspendPlaybackForOptimization()
         fragmentedMuxerRetryAttempted = false
         timeEstimator.reset(SystemClock.elapsedRealtime())
@@ -248,9 +246,7 @@ class OptimizationService : Service() {
             handler.post(progressPoll)
         }.onFailure { error ->
             Log.e(TAG, "Could not start video export", error)
-            failOptimization(
-                "Could not start video export: ${error.message ?: error.javaClass.simpleName}",
-            )
+            failOptimization("Could not start video export: ${error.detail}")
         }
     }
 
@@ -291,18 +287,19 @@ class OptimizationService : Service() {
             ?: "Video export failed"
         val codecDetail = exportException.codecInfo?.let { " · codec: $it" }.orEmpty()
         return "$errorCodeName (${exportException.errorCode}) at " +
-            "${progressHolder.progress.coerceIn(0, 99)}%: $causeDetail$codecDetail"
+                "${progressHolder.progress.coerceIn(0, 99)}%: $causeDetail$codecDetail"
     }
-
-    private fun shouldResumePlayback(snapshot: PlaybackSnapshot): Boolean =
-        snapshot.timelineRunning && snapshot.status in PLAYBACK_STATUSES_TO_RESTORE
 
     private fun suspendPlaybackForOptimization() {
         if (!resumePlaybackAfterOptimization) return
-        repository.pauseTimeline()
-        repository.setStatus(PlaybackStatus.PAUSED, "Playback paused while optimizing")
+        repository.setStatus(PlaybackStatus.SUSPENDED, "Playback waits for optimization")
         runCatching {
-            startService(PlaybackService.intent(this, PlaybackService.Action.PAUSE))
+            startService(
+                PlaybackService.intent(
+                    this,
+                    PlaybackService.Action.SUSPEND_FOR_OPTIMIZATION
+                )
+            )
         }.onFailure { error ->
             Log.w(TAG, "Could not suspend widget playback before optimization", error)
         }
@@ -316,7 +313,7 @@ class OptimizationService : Service() {
             add(FrameDropEffect.createDefaultFrameDropEffect(target.targetFps))
         }
         val crop = OptimizationPlanner.combinedCrop(snapshot, target)
-        if (crop != com.bludood.homeloop.data.CropInsets()) {
+        if (crop != CropInsets()) {
             add(
                 Crop(
                     -1f + 2f * crop.left / snapshot.videoWidth,
@@ -428,29 +425,25 @@ class OptimizationService : Service() {
     private fun restorePlaybackIfNeeded() {
         if (!resumePlaybackAfterOptimization) return
         resumePlaybackAfterOptimization = false
-        repository.resumeTimeline()
+        if (!repository.snapshot().timelineRunning) return
         repository.setStatus(PlaybackStatus.STARTING, "Resuming after optimization")
         runCatching {
             ContextCompat.startForegroundService(
                 this,
-                PlaybackService.intent(this, PlaybackService.Action.RESUME),
+                PlaybackService.intent(this, PlaybackService.Action.ENSURE_RUNNING),
             )
         }.onFailure { error ->
             Log.e(TAG, "Could not restore widget playback after optimization", error)
-            repository.pauseTimeline()
             repository.setStatus(
                 PlaybackStatus.ERROR,
-                "Could not resume after optimization: ${error.message ?: error.javaClass.simpleName}",
+                "Could not resume after optimization: ${error.detail}",
             )
         }
     }
 
     @SuppressLint("InlinedApi")
     private fun startForeground(progress: Int, text: String) {
-        // ServiceCompat 1.17 masks out the API 35 mediaProcessing bit on API 34+, which
-        // turns it into FOREGROUND_SERVICE_TYPE_NONE and crashes target-SDK 34+ apps.
-        // The three-argument platform API is available from our minSdk (29), and Android
-        // explicitly supports using newer foreground-service type constants on older releases.
+        // ServiceCompat 1.17 drops the mediaProcessing type and crashes, so use the platform call.
         startForeground(
             NOTIFICATION_ID,
             buildNotification(progress, text),
@@ -528,6 +521,7 @@ class OptimizationService : Service() {
     }
 
     override fun onDestroy() {
+        serviceAlive = false
         if (running) {
             running = false
             preparationJob?.cancel(true)
@@ -555,11 +549,9 @@ class OptimizationService : Service() {
         private const val FPS_EPSILON = 0.01f
         private const val MUXER_SAMPLE_TIMEOUT_MS = 60_000L
         private const val MAX_REPORTED_CAUSE_DEPTH = 6
-        private val PLAYBACK_STATUSES_TO_RESTORE = setOf(
-            PlaybackStatus.STARTING,
-            PlaybackStatus.RENDERING,
-            PlaybackStatus.SUSPENDED,
-        )
+        @Volatile
+        var serviceAlive = false
+            private set
 
         fun intent(context: Context, cancel: Boolean = false): Intent =
             Intent(context, OptimizationService::class.java).putExtra(

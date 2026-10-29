@@ -7,7 +7,6 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
 import android.os.SystemClock
-import com.bludood.homeloop.data.FrameRateOption
 import com.bludood.homeloop.data.CropInsets
 import com.bludood.homeloop.data.ScalingFilter
 import com.bludood.homeloop.playback.gl.CodecOutputSurface
@@ -19,7 +18,7 @@ class VideoFrameDecoder(
     private val startPositionMs: Long,
     private val endPositionMs: Long? = null,
     private val playbackAnchorRealtimeNs: Long = SystemClock.elapsedRealtimeNanos(),
-    private val frameRate: FrameRateOption,
+    private val frameDivisor: Int,
     private val knownSourceFrameRate: Float,
     private val outputWidth: Int,
     private val outputHeight: Int,
@@ -33,6 +32,7 @@ class VideoFrameDecoder(
     private val realtime: Boolean = true,
 ) {
     private val appContext = context.applicationContext
+
     @Throws(IOException::class)
     fun decodeUntilEndOrStopped() {
         val extractor = MediaExtractor()
@@ -67,7 +67,7 @@ class VideoFrameDecoder(
             extractor.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
             onInfo(
                 "Decoder: $mime ${sourceWidth}×$sourceHeight, " +
-                    "output ${outputWidth}×$outputHeight, filter ${scalingFilter.label}",
+                        "output ${outputWidth}×$outputHeight, filter ${scalingFilter.label}",
             )
 
             outputSurface = CodecOutputSurface(outputWidth, outputHeight, scalingFilter)
@@ -110,12 +110,9 @@ class VideoFrameDecoder(
         val bufferInfo = MediaCodec.BufferInfo()
         var inputDone = false
         var outputDone = false
-        val fixedFrameIntervalUs = frameRate.fixedFps?.let { 1_000_000L / it }
-        var nextPublishUs = requestedStartUs
         var sourceFrameIndex = 0L
         val playbackStartNs = playbackAnchorRealtimeNs
-        val effectiveFps = frameRate.fixedFps?.toFloat()
-            ?: if (sourceFps > 0f) sourceFps / requireNotNull(frameRate.sourceDivisor) else 30f
+        val effectiveFps = if (sourceFps > 0f) sourceFps / frameDivisor else 30f
         val frameBudgetNs = (1_000_000_000.0 / effectiveFps.coerceAtLeast(1f)).toLong()
         val lateToleranceNs = maxOf(frameBudgetNs / 2L, MIN_LATE_TOLERANCE_NS)
         var selectedFrameCount = 0L
@@ -130,6 +127,8 @@ class VideoFrameDecoder(
         var reportedCadenceSkipped = 0L
         var reportedLateDropped = 0L
         var lastReportMs = SystemClock.elapsedRealtime()
+        var lastOutputMs = lastReportMs
+        var lastPublishedNs: Long? = null
 
         fun reportDiagnostics(force: Boolean = false) {
             val now = SystemClock.elapsedRealtime()
@@ -155,6 +154,9 @@ class VideoFrameDecoder(
         }
 
         while (!outputDone && !shouldStop()) {
+            if (FrameDeliveryPolicy.outputStalled(SystemClock.elapsedRealtime(), lastOutputMs)) {
+                throw IOException("Video decoder stopped producing output")
+            }
             if (!inputDone) {
                 val inputIndex = codec.dequeueInputBuffer(CODEC_TIMEOUT_US)
                 if (inputIndex >= 0) {
@@ -163,7 +165,7 @@ class VideoFrameDecoder(
                     inputBuffer.clear()
                     val sampleTimeUs = extractor.sampleTime
                     val reachedTrimEnd = requestedEndUs != null &&
-                        sampleTimeUs >= requestedEndUs
+                            sampleTimeUs >= requestedEndUs
                     val sampleSize = if (reachedTrimEnd) {
                         -1
                     } else {
@@ -192,9 +194,11 @@ class VideoFrameDecoder(
                     onInfo("Output format: ${codec.outputFormat}")
                     continue
                 }
+
                 outputIndex < 0 -> continue
             }
 
+            lastOutputMs = SystemClock.elapsedRealtime()
             val endOfStream = bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
             val presentationUs = bufferInfo.presentationTimeUs
             decodedFrameCount++
@@ -204,29 +208,17 @@ class VideoFrameDecoder(
             } else if (presentationUs < requestedStartUs) {
                 codec.releaseOutputBuffer(outputIndex, false)
             } else {
-                val cadenceSelected = if (frameRate.isSourceBased) {
-                    val selected = sourceFrameIndex % requireNotNull(frameRate.sourceDivisor) == 0L
-                    sourceFrameIndex++
-                    selected
-                } else {
-                    val interval = requireNotNull(fixedFrameIntervalUs)
-                    if (presentationUs >= nextPublishUs) {
-                        while (nextPublishUs <= presentationUs) nextPublishUs += interval
-                        true
-                    } else {
-                        false
-                    }
-                }
-                if (cadenceSelected) {
+                if (sourceFrameIndex++ % frameDivisor == 0L) {
                     selectedFrameCount++
                     val targetNs = playbackStartNs +
-                        (presentationUs - requestedStartUs).coerceAtLeast(0L) * 1_000L
+                            (presentationUs - requestedStartUs).coerceAtLeast(0L) * 1_000L
                     val nowNs = SystemClock.elapsedRealtimeNanos()
                     val predictedCompletionNs = nowNs + renderLeadNs
                     val latenessNs = if (realtime) predictedCompletionNs - targetNs else 0L
-                    if (realtime && latenessNs > lateToleranceNs) {
-                        // Rendering an already-obsolete bitmap would add latency, heat, and launcher
-                        // traffic. Drop it before the synchronous glReadPixels operation instead.
+                    if (realtime && FrameDeliveryPolicy.shouldDrop(
+                            latenessNs, lateToleranceNs, nowNs, lastPublishedNs
+                        )
+                    ) {
                         codec.releaseOutputBuffer(outputIndex, false)
                         lateDropCount++
                         reportDiagnostics()
@@ -242,30 +234,32 @@ class VideoFrameDecoder(
                     codec.releaseOutputBuffer(outputIndex, true)
                     outputSurface.awaitNewImage()
                     val bitmap = outputSurface.drawAndReadBitmap(
-                            sourceWidth,
-                            sourceHeight,
-                            rotation,
-                            cropInsets,
+                        sourceWidth,
+                        sourceHeight,
+                        rotation,
+                        cropInsets,
                     )
                     outputSurface.acceptReusableBitmap(onFrame(bitmap, presentationUs))
                     val observedRenderNs = SystemClock.elapsedRealtimeNanos() - renderStartNs
                     renderLeadNs = (
-                        renderLeadNs * (RENDER_LEAD_SMOOTHING - 1L) + observedRenderNs
-                    ) / RENDER_LEAD_SMOOTHING
+                            renderLeadNs * (RENDER_LEAD_SMOOTHING - 1L) + observedRenderNs
+                            ) / RENDER_LEAD_SMOOTHING
                     renderLeadNs = renderLeadNs.coerceIn(0L, MAX_RENDER_LEAD_NS)
+                    lastPublishedNs = SystemClock.elapsedRealtimeNanos()
+                    lastOutputMs = SystemClock.elapsedRealtime()
                     publishedFrameCount++
                 } else {
                     cadenceSkippedCount++
                     codec.releaseOutputBuffer(outputIndex, false)
                 }
             }
-            outputDone = endOfStream
+            outputDone = outputDone || endOfStream
             reportDiagnostics()
         }
         reportDiagnostics(force = true)
         onInfo(
             "Cadence: selected=$selectedFrameCount, published=$publishedFrameCount, " +
-                "lateDropped=$lateDropCount",
+                    "lateDropped=$lateDropCount",
         )
     }
 
@@ -297,7 +291,9 @@ class VideoFrameDecoder(
     private fun MediaFormat.frameRateOr(fallback: Float): Float {
         if (!containsKey(MediaFormat.KEY_FRAME_RATE)) return fallback
         return runCatching { getFloat(MediaFormat.KEY_FRAME_RATE) }.getOrNull()
-            ?: runCatching { getInteger(MediaFormat.KEY_FRAME_RATE).toFloat() }.getOrDefault(fallback)
+            ?: runCatching { getInteger(MediaFormat.KEY_FRAME_RATE).toFloat() }.getOrDefault(
+                fallback
+            )
     }
 
     companion object {

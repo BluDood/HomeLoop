@@ -30,7 +30,6 @@ class EncodingTimeEstimator {
         if (elapsedMs < MIN_SAMPLE_TIME_MS || progress < MIN_PROGRESS_PERCENT) return null
         val overallRate = progress.toDouble() / elapsedMs
         val recentRate = smoothedPercentPerMs ?: overallRate
-        // Blend full-run and recent speed so thermal throttling changes the ETA gradually.
         val rate = overallRate * OVERALL_RATE_WEIGHT + recentRate * (1.0 - OVERALL_RATE_WEIGHT)
         if (!rate.isFinite() || rate <= 0.0) return null
         return ((100 - progress) / rate).roundToLong().coerceIn(0L, MAX_ESTIMATE_MS)

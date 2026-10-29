@@ -11,12 +11,10 @@ import kotlin.math.roundToInt
 
 object AutoResolutionResolver {
     fun resolve(context: Context, snapshot: PlaybackSnapshot): OutputSize {
-        if (!snapshot.resolution.isAuto) {
-            return OutputSize(snapshot.resolution.width, snapshot.resolution.height)
-        }
         val metrics = context.resources.displayMetrics
         val widgetManager = AppWidgetManager.getInstance(context)
-        val portrait = context.resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE
+        val portrait =
+            context.resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE
         val desired = VideoWidgetProvider.widgetIds(context)
             .map { id ->
                 val options = widgetManager.getAppWidgetOptions(id)
@@ -36,7 +34,7 @@ object AutoResolutionResolver {
             .filter { it.width > 0 && it.height > 0 }
             .maxByOrNull { it.width.toLong() * it.height }
             ?: OutputSize(FALLBACK_WIDTH, FALLBACK_HEIGHT)
-        val scale = requireNotNull(snapshot.resolution.autoScalePercent) / 100.0
+        val scale = snapshot.resolution.autoScalePercent / 100.0
 
         return AutoResolutionCalculator.calculate(
             desiredWidth = (desired.width * scale).roundToInt(),

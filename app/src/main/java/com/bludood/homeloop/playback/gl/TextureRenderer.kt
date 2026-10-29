@@ -37,7 +37,7 @@ internal class TextureRenderer(private val scalingFilter: ScalingFilter) {
         cropBoundsHandle = GLES20.glGetUniformLocation(program, "uCropBounds")
         check(
             positionHandle >= 0 && textureCoordinateHandle >= 0 &&
-                mvpMatrixHandle >= 0 && surfaceTransformHandle >= 0,
+                    mvpMatrixHandle >= 0 && surfaceTransformHandle >= 0,
         ) { "Required OpenGL shader handle was not found" }
         if (scalingFilter == ScalingFilter.BICUBIC || scalingFilter == ScalingFilter.LANCZOS2) {
             check(sampleStepHandle >= 0 && cropBoundsHandle >= 0) {
@@ -164,93 +164,94 @@ internal class TextureRenderer(private val scalingFilter: ScalingFilter) {
         private val TEXTURE_COORDINATES = floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)
         private const val VERTEX_SHADER =
             "uniform mat4 uMVPMatrix;\n" +
-                "attribute vec4 aPosition;\n" +
-                "attribute vec4 aTextureCoord;\n" +
-                "varying vec2 vCanonicalCoord;\n" +
-                "void main() {\n" +
-                "  gl_Position = uMVPMatrix * aPosition;\n" +
-                "  vCanonicalCoord = aTextureCoord.xy;\n" +
-                "}\n"
+                    "attribute vec4 aPosition;\n" +
+                    "attribute vec4 aTextureCoord;\n" +
+                    "varying vec2 vCanonicalCoord;\n" +
+                    "void main() {\n" +
+                    "  gl_Position = uMVPMatrix * aPosition;\n" +
+                    "  vCanonicalCoord = aTextureCoord.xy;\n" +
+                    "}\n"
         private const val FRAGMENT_HEADER =
             "#extension GL_OES_EGL_image_external : require\n" +
-                "precision mediump float;\n" +
-                "varying vec2 vCanonicalCoord;\n" +
-                "uniform samplerExternalOES sTexture;\n" +
-                "uniform mat4 uSTMatrix;\n"
+                    "precision mediump float;\n" +
+                    "varying vec2 vCanonicalCoord;\n" +
+                    "uniform samplerExternalOES sTexture;\n" +
+                    "uniform mat4 uSTMatrix;\n"
         private const val DIRECT_FRAGMENT_BODY =
             "void main() {\n" +
-                "  vec2 textureCoord = (uSTMatrix * vec4(vCanonicalCoord, 0.0, 1.0)).xy;\n" +
-                "  gl_FragColor = texture2D(sTexture, textureCoord);\n" +
-                "}\n"
+                    "  vec2 textureCoord = (uSTMatrix * vec4(vCanonicalCoord, 0.0, 1.0)).xy;\n" +
+                    "  gl_FragColor = texture2D(sTexture, textureCoord);\n" +
+                    "}\n"
         private const val FILTER_HELPERS =
             "uniform vec2 uSampleStep;\n" +
-                "uniform vec4 uCropBounds;\n" +
-                "vec4 sampleSource(vec2 coord) {\n" +
-                "  vec2 safeCoord = clamp(coord, uCropBounds.xy, uCropBounds.zw);\n" +
-                "  vec2 transformed = (uSTMatrix * vec4(safeCoord, 0.0, 1.0)).xy;\n" +
-                "  return texture2D(sTexture, transformed);\n" +
-                "}\n"
+                    "uniform vec4 uCropBounds;\n" +
+                    "vec4 sampleSource(vec2 coord) {\n" +
+                    "  vec2 safeCoord = clamp(coord, uCropBounds.xy, uCropBounds.zw);\n" +
+                    "  vec2 transformed = (uSTMatrix * vec4(safeCoord, 0.0, 1.0)).xy;\n" +
+                    "  return texture2D(sTexture, transformed);\n" +
+                    "}\n"
         private const val BICUBIC_BODY =
             "float cubicWeight(float value) {\n" +
-                "  float x = abs(value);\n" +
-                "  if (x <= 1.0) return 1.5*x*x*x - 2.5*x*x + 1.0;\n" +
-                "  if (x < 2.0) return -0.5*x*x*x + 2.5*x*x - 4.0*x + 2.0;\n" +
-                "  return 0.0;\n" +
-                "}\n" +
-                "void main() {\n" +
-                "  vec2 grid = vCanonicalCoord / uSampleStep - 0.5;\n" +
-                "  vec2 base = floor(grid);\n" +
-                "  vec2 fraction = fract(grid);\n" +
-                "  vec4 color = vec4(0.0);\n" +
-                "  float totalWeight = 0.0;\n" +
-                "  for (int y = 0; y < 4; y++) {\n" +
-                "    float offsetY = float(y) - 1.0;\n" +
-                "    float weightY = cubicWeight(offsetY - fraction.y);\n" +
-                "    for (int x = 0; x < 4; x++) {\n" +
-                "      float offsetX = float(x) - 1.0;\n" +
-                "      float weight = cubicWeight(offsetX - fraction.x) * weightY;\n" +
-                "      vec2 coord = (base + vec2(offsetX, offsetY) + 0.5) * uSampleStep;\n" +
-                "      color += sampleSource(coord) * weight;\n" +
-                "      totalWeight += weight;\n" +
-                "    }\n" +
-                "  }\n" +
-                "  gl_FragColor = clamp(color / max(totalWeight, 0.0001), 0.0, 1.0);\n" +
-                "}\n"
+                    "  float x = abs(value);\n" +
+                    "  if (x <= 1.0) return 1.5*x*x*x - 2.5*x*x + 1.0;\n" +
+                    "  if (x < 2.0) return -0.5*x*x*x + 2.5*x*x - 4.0*x + 2.0;\n" +
+                    "  return 0.0;\n" +
+                    "}\n" +
+                    "void main() {\n" +
+                    "  vec2 grid = vCanonicalCoord / uSampleStep - 0.5;\n" +
+                    "  vec2 base = floor(grid);\n" +
+                    "  vec2 fraction = fract(grid);\n" +
+                    "  vec4 color = vec4(0.0);\n" +
+                    "  float totalWeight = 0.0;\n" +
+                    "  for (int y = 0; y < 4; y++) {\n" +
+                    "    float offsetY = float(y) - 1.0;\n" +
+                    "    float weightY = cubicWeight(offsetY - fraction.y);\n" +
+                    "    for (int x = 0; x < 4; x++) {\n" +
+                    "      float offsetX = float(x) - 1.0;\n" +
+                    "      float weight = cubicWeight(offsetX - fraction.x) * weightY;\n" +
+                    "      vec2 coord = (base + vec2(offsetX, offsetY) + 0.5) * uSampleStep;\n" +
+                    "      color += sampleSource(coord) * weight;\n" +
+                    "      totalWeight += weight;\n" +
+                    "    }\n" +
+                    "  }\n" +
+                    "  gl_FragColor = clamp(color / max(totalWeight, 0.0001), 0.0, 1.0);\n" +
+                    "}\n"
         private const val LANCZOS_BODY =
             "float sincWeight(float value) {\n" +
-                "  float angle = 3.14159265 * value;\n" +
-                "  if (abs(angle) < 0.0001) return 1.0;\n" +
-                "  return sin(angle) / angle;\n" +
-                "}\n" +
-                "float lanczosWeight(float value) {\n" +
-                "  float x = abs(value);\n" +
-                "  if (x >= 2.0) return 0.0;\n" +
-                "  return sincWeight(x) * sincWeight(x * 0.5);\n" +
-                "}\n" +
-                "void main() {\n" +
-                "  vec2 grid = vCanonicalCoord / uSampleStep - 0.5;\n" +
-                "  vec2 base = floor(grid);\n" +
-                "  vec2 fraction = fract(grid);\n" +
-                "  vec4 color = vec4(0.0);\n" +
-                "  float totalWeight = 0.0;\n" +
-                "  for (int y = 0; y < 4; y++) {\n" +
-                "    float offsetY = float(y) - 1.0;\n" +
-                "    float weightY = lanczosWeight(offsetY - fraction.y);\n" +
-                "    for (int x = 0; x < 4; x++) {\n" +
-                "      float offsetX = float(x) - 1.0;\n" +
-                "      float weight = lanczosWeight(offsetX - fraction.x) * weightY;\n" +
-                "      vec2 coord = (base + vec2(offsetX, offsetY) + 0.5) * uSampleStep;\n" +
-                "      color += sampleSource(coord) * weight;\n" +
-                "      totalWeight += weight;\n" +
-                "    }\n" +
-                "  }\n" +
-                "  gl_FragColor = clamp(color / max(totalWeight, 0.0001), 0.0, 1.0);\n" +
-                "}\n"
+                    "  float angle = 3.14159265 * value;\n" +
+                    "  if (abs(angle) < 0.0001) return 1.0;\n" +
+                    "  return sin(angle) / angle;\n" +
+                    "}\n" +
+                    "float lanczosWeight(float value) {\n" +
+                    "  float x = abs(value);\n" +
+                    "  if (x >= 2.0) return 0.0;\n" +
+                    "  return sincWeight(x) * sincWeight(x * 0.5);\n" +
+                    "}\n" +
+                    "void main() {\n" +
+                    "  vec2 grid = vCanonicalCoord / uSampleStep - 0.5;\n" +
+                    "  vec2 base = floor(grid);\n" +
+                    "  vec2 fraction = fract(grid);\n" +
+                    "  vec4 color = vec4(0.0);\n" +
+                    "  float totalWeight = 0.0;\n" +
+                    "  for (int y = 0; y < 4; y++) {\n" +
+                    "    float offsetY = float(y) - 1.0;\n" +
+                    "    float weightY = lanczosWeight(offsetY - fraction.y);\n" +
+                    "    for (int x = 0; x < 4; x++) {\n" +
+                    "      float offsetX = float(x) - 1.0;\n" +
+                    "      float weight = lanczosWeight(offsetX - fraction.x) * weightY;\n" +
+                    "      vec2 coord = (base + vec2(offsetX, offsetY) + 0.5) * uSampleStep;\n" +
+                    "      color += sampleSource(coord) * weight;\n" +
+                    "      totalWeight += weight;\n" +
+                    "    }\n" +
+                    "  }\n" +
+                    "  gl_FragColor = clamp(color / max(totalWeight, 0.0001), 0.0, 1.0);\n" +
+                    "}\n"
 
         private fun fragmentShader(filter: ScalingFilter): String = when (filter) {
             ScalingFilter.NEAREST,
             ScalingFilter.BILINEAR,
-            -> FRAGMENT_HEADER + DIRECT_FRAGMENT_BODY
+                -> FRAGMENT_HEADER + DIRECT_FRAGMENT_BODY
+
             ScalingFilter.BICUBIC -> FRAGMENT_HEADER + FILTER_HELPERS + BICUBIC_BODY
             ScalingFilter.LANCZOS2 -> FRAGMENT_HEADER + FILTER_HELPERS + LANCZOS_BODY
         }

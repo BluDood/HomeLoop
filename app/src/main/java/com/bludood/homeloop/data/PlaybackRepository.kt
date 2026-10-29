@@ -2,10 +2,13 @@ package com.bludood.homeloop.data
 
 import android.content.Context
 import android.content.Intent
-import android.media.MediaMetadataRetriever
-import android.media.MediaExtractor
+import android.content.SharedPreferences
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.media.MediaCodecList
+import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.SystemClock
 import android.provider.DocumentsContract
@@ -15,9 +18,11 @@ import android.system.Os
 import android.system.OsConstants
 import androidx.core.content.edit
 import androidx.core.net.toUri
+import com.bludood.homeloop.playback.BlackBarDetector
+import com.bludood.homeloop.playback.OptimizationService
+import com.bludood.homeloop.playback.PlaybackController
 import java.io.File
 import java.util.concurrent.ThreadLocalRandom
-import kotlin.math.abs
 
 class PlaybackRepository(context: Context) {
     private val appContext = context.applicationContext
@@ -30,15 +35,11 @@ class PlaybackRepository(context: Context) {
                 Intent.FLAG_GRANT_READ_URI_PERMISSION,
             )
         } catch (_: SecurityException) {
-            // Some document providers keep the grant without exposing a persistable flag.
         }
 
         val metadata = readMetadata(uri)
         require(metadata.durationMs > 0L) { "This file does not contain a readable video duration." }
         val displayName = readDisplayName(uri)
-        val positionMs = 0L
-        val nowElapsed = SystemClock.elapsedRealtime()
-        val nowWall = System.currentTimeMillis()
         deleteOptimizedFile()
 
         preferences.edit {
@@ -50,26 +51,14 @@ class PlaybackRepository(context: Context) {
             putInt(KEY_VIDEO_WIDTH, metadata.width)
             putInt(KEY_VIDEO_HEIGHT, metadata.height)
             putFloat(KEY_SOURCE_FRAME_RATE, metadata.frameRate)
-            putInt(KEY_METADATA_VERSION, CURRENT_METADATA_VERSION)
-            putLong(KEY_SOURCE_FILE_SIZE, metadata.diagnostics.fileSizeBytes)
-            putLong(KEY_SOURCE_LAST_MODIFIED, metadata.diagnostics.lastModifiedMs)
-            putString(KEY_CONTAINER_MIME, metadata.diagnostics.containerMime)
-            putString(KEY_VIDEO_MIME, metadata.diagnostics.videoMime)
-            putInt(KEY_VIDEO_BITRATE, metadata.diagnostics.videoBitrate)
-            putInt(KEY_VIDEO_ROTATION, metadata.diagnostics.rotationDegrees)
-            putInt(KEY_AUDIO_TRACK_COUNT, metadata.diagnostics.audioTrackCount)
-            putInt(KEY_SUBTITLE_TRACK_COUNT, metadata.diagnostics.subtitleTrackCount)
-            putBoolean(KEY_HDR, metadata.diagnostics.hdr)
-            putBoolean(KEY_SEEKABLE, metadata.diagnostics.seekable)
-            putString(KEY_PROVIDER, metadata.diagnostics.provider)
-            putString(KEY_HARDWARE_DECODER, metadata.diagnostics.hardwareDecoder)
+            putInputDiagnostics(this, metadata.diagnostics)
             putInt(KEY_CROP_TOP, 0)
             putInt(KEY_CROP_RIGHT, 0)
             putInt(KEY_CROP_BOTTOM, 0)
             putInt(KEY_CROP_LEFT, 0)
-            putLong(KEY_ANCHOR_POSITION, positionMs)
-            putLong(KEY_ANCHOR_ELAPSED, nowElapsed)
-            putLong(KEY_ANCHOR_WALL, nowWall)
+            putLong(KEY_ANCHOR_POSITION, 0L)
+            putLong(KEY_ANCHOR_ELAPSED, SystemClock.elapsedRealtime())
+            putLong(KEY_ANCHOR_WALL, System.currentTimeMillis())
             putInt(KEY_ANCHOR_BOOT, bootCount())
             putBoolean(KEY_TIMELINE_RUNNING, true)
             putString(KEY_STATUS, PlaybackStatus.IDLE.name)
@@ -84,36 +73,12 @@ class PlaybackRepository(context: Context) {
         val sourceDurationMs = preferences.getLong(KEY_DURATION, 0L).coerceAtLeast(0L)
         val trimRange = trimRange(sourceDurationMs)
         val durationMs = (trimRange.endMs - trimRange.startMs).coerceAtLeast(0L)
-        val legacyFrameRate = preferences.getInt(KEY_FPS, 30)
-        val frameRate = preferences.getString(KEY_FRAME_RATE_MODE, null)
-            ?.let { id -> PlaybackOptions.frameRates.firstOrNull { it.id == id } }
-            ?: if (preferences.contains(KEY_FPS)) {
-                PlaybackOptions.fixedFrameRate(legacyFrameRate)
-            } else {
-                PlaybackOptions.defaultFrameRate
-            }
-        val width = preferences.getInt(KEY_WIDTH, PlaybackOptions.defaultResolution.width)
-        val height = preferences.getInt(KEY_HEIGHT, PlaybackOptions.defaultResolution.height)
+        val frameRateId = preferences.getString(KEY_FRAME_RATE_MODE, null)
+        val frameRate = PlaybackOptions.frameRates.firstOrNull { it.id == frameRateId }
+            ?: PlaybackOptions.defaultFrameRate
         val autoScale = preferences.getInt(KEY_AUTO_SCALE, 100)
-        val resolution = if (width <= 0 || height <= 0) {
-            PlaybackOptions.resolutions.firstOrNull { it.autoScalePercent == autoScale }
-        } else {
-            PlaybackOptions.resolutions.firstOrNull {
-                !it.isAuto && it.width == width && it.height == height
-            }
-        } ?: PlaybackOptions.defaultResolution
-        val status = preferences.getString(KEY_STATUS, null)
-            ?.let { runCatching { PlaybackStatus.valueOf(it) }.getOrNull() }
-            ?: PlaybackStatus.IDLE
-        val tapAction = preferences.getString(KEY_WIDGET_TAP_ACTION, null)
-            ?.let { runCatching { WidgetTapAction.valueOf(it) }.getOrNull() }
-            ?: WidgetTapAction.OPEN_APP
-        val renderingPolicy = preferences.getString(KEY_RENDERING_POLICY, null)
-            ?.let { runCatching { RenderingPolicy.valueOf(it) }.getOrNull() }
-            ?: RenderingPolicy.HOME_SCREEN_ONLY
-        val hiddenAudioPolicy = preferences.getString(KEY_HIDDEN_AUDIO_POLICY, null)
-            ?.let { runCatching { HiddenAudioPolicy.valueOf(it) }.getOrNull() }
-            ?: HiddenAudioPolicy.SUSPEND
+        val resolution = PlaybackOptions.resolutions.firstOrNull { it.autoScalePercent == autoScale }
+            ?: PlaybackOptions.defaultResolution
         val timelineRunning = preferences.getBoolean(KEY_TIMELINE_RUNNING, true)
         val videoWidth = preferences.getInt(KEY_VIDEO_WIDTH, 0).coerceAtLeast(0)
         val videoHeight = preferences.getInt(KEY_VIDEO_HEIGHT, 0).coerceAtLeast(0)
@@ -123,12 +88,6 @@ class PlaybackRepository(context: Context) {
             bottom = preferences.getInt(KEY_CROP_BOTTOM, 0),
             left = preferences.getInt(KEY_CROP_LEFT, 0),
         ).clamped(videoWidth, videoHeight)
-        val upscaleFilter = preferences.getString(KEY_UPSCALE_FILTER, null)
-            ?.let { runCatching { ScalingFilter.valueOf(it) }.getOrNull() }
-            ?: ScalingFilter.BILINEAR
-        val downscaleFilter = preferences.getString(KEY_DOWNSCALE_FILTER, null)
-            ?.let { runCatching { ScalingFilter.valueOf(it) }.getOrNull() }
-            ?: ScalingFilter.BILINEAR
         val inputDiagnostics = InputVideoDiagnostics(
             fileSizeBytes = preferences.getLong(KEY_SOURCE_FILE_SIZE, -1L),
             lastModifiedMs = preferences.getLong(KEY_SOURCE_LAST_MODIFIED, 0L),
@@ -156,9 +115,7 @@ class PlaybackRepository(context: Context) {
             audioDriftMs = preferences.getLong(KEY_RUNTIME_AUDIO_DRIFT, 0L),
             audioRestartCount = preferences.getInt(KEY_RUNTIME_AUDIO_RESTARTS, 0),
             audioError = preferences.getString(KEY_RUNTIME_AUDIO_ERROR, null).orEmpty(),
-            audioState = preferences.getString(KEY_RUNTIME_AUDIO_STATE, null)
-                ?.let { runCatching { AudioPipelineState.valueOf(it) }.getOrNull() }
-                ?: AudioPipelineState.STOPPED,
+            audioState = storedEnum(KEY_RUNTIME_AUDIO_STATE, AudioPipelineState.STOPPED),
             sampleElapsedMs = preferences.getLong(KEY_RUNTIME_SAMPLE_ELAPSED, 0L),
             active = preferences.getBoolean(KEY_RUNTIME_ACTIVE, false),
         )
@@ -179,15 +136,15 @@ class PlaybackRepository(context: Context) {
             sourceFrameRate = preferences.getFloat(KEY_SOURCE_FRAME_RATE, 0f).coerceAtLeast(0f),
             resolution = resolution,
             cropInsets = cropInsets,
-            upscaleFilter = upscaleFilter,
-            downscaleFilter = downscaleFilter,
+            upscaleFilter = storedEnum(KEY_UPSCALE_FILTER, ScalingFilter.BILINEAR),
+            downscaleFilter = storedEnum(KEY_DOWNSCALE_FILTER, ScalingFilter.BILINEAR),
             inputDiagnostics = inputDiagnostics,
             runtimeDiagnostics = runtimeDiagnostics,
             audioEnabled = preferences.getBoolean(KEY_AUDIO, false),
-            renderingPolicy = renderingPolicy,
-            hiddenAudioPolicy = hiddenAudioPolicy,
-            widgetTapAction = tapAction,
-            status = status,
+            renderingPolicy = storedEnum(KEY_RENDERING_POLICY, RenderingPolicy.HOME_SCREEN_ONLY),
+            hiddenAudioPolicy = storedEnum(KEY_HIDDEN_AUDIO_POLICY, HiddenAudioPolicy.SUSPEND),
+            widgetTapAction = storedEnum(KEY_WIDGET_TAP_ACTION, WidgetTapAction.SHOW_CONTROLS),
+            status = storedEnum(KEY_STATUS, PlaybackStatus.IDLE),
             statusDetail = preferences.getString(KEY_STATUS_DETAIL, null).orEmpty()
                 .ifBlank { "Ready" },
         )
@@ -197,7 +154,7 @@ class PlaybackRepository(context: Context) {
         ?.let { runCatching { it.toUri() }.getOrNull() }
 
     fun optimizedUri(profile: OptimizationProfile?): Uri? {
-        if (profile == null || preferences.getString(KEY_OPTIMIZED_SIGNATURE, null) != profile.signature) {
+        if (profile == null || preferences.getString("${SAVED_PROFILE}signature", null) != profile.signature) {
             return null
         }
         val path = preferences.getString(KEY_OPTIMIZED_PATH, null) ?: return null
@@ -207,12 +164,10 @@ class PlaybackRepository(context: Context) {
 
     fun optimizationSnapshot(currentProfile: OptimizationProfile?): OptimizationSnapshot {
         reconcileInterruptedOptimization()
-        val storedStatus = preferences.getString(KEY_OPTIMIZATION_STATUS, null)
-            ?.let { runCatching { OptimizationStatus.valueOf(it) }.getOrNull() }
-            ?: OptimizationStatus.NONE
+        val storedStatus = storedEnum(KEY_OPTIMIZATION_STATUS, OptimizationStatus.NONE)
         val path = preferences.getString(KEY_OPTIMIZED_PATH, null)
-        val storedProfile = storedOptimizationProfile()
-        val pendingProfile = storedPendingOptimizationProfile()
+        val storedProfile = storedProfile(SAVED_PROFILE)
+        val pendingProfile = storedProfile(PENDING_PROFILE)
         val fileReady = path?.let { File(it).isFile && File(it).length() > 0L } == true
         val status = when {
             storedStatus == OptimizationStatus.RUNNING -> OptimizationStatus.RUNNING
@@ -220,6 +175,7 @@ class PlaybackRepository(context: Context) {
             storedStatus == OptimizationStatus.CANCELLED -> OptimizationStatus.CANCELLED
             fileReady && currentProfile != null && storedProfile?.signature == currentProfile.signature ->
                 OptimizationStatus.READY
+
             fileReady -> OptimizationStatus.STALE
             else -> OptimizationStatus.NONE
         }
@@ -234,6 +190,7 @@ class PlaybackRepository(context: Context) {
             OptimizationStatus.READY -> retainedDetail ?: "Optimized copy is active"
             OptimizationStatus.STALE -> retainedDetail
                 ?: "Optimized copy is out of date for the current settings"
+
             OptimizationStatus.FAILED -> storedDetail.ifBlank { "Optimization failed" }
             OptimizationStatus.CANCELLED -> "Optimization cancelled"
         }
@@ -249,6 +206,8 @@ class PlaybackRepository(context: Context) {
             } else {
                 currentProfile
             },
+            remainingMs = preferences.getLong(KEY_OPTIMIZATION_REMAINING, -1L)
+                .takeIf { status == OptimizationStatus.RUNNING && it >= 0L },
         )
     }
 
@@ -257,39 +216,37 @@ class PlaybackRepository(context: Context) {
             putString(KEY_OPTIMIZATION_STATUS, OptimizationStatus.RUNNING.name)
             putInt(KEY_OPTIMIZATION_PROGRESS, 0)
             putString(KEY_OPTIMIZATION_DETAIL, "Preparing optimized copy")
-            putLong(KEY_OPTIMIZATION_HEARTBEAT, System.currentTimeMillis())
-            putPendingOptimizationProfile(this, profile)
+            remove(KEY_OPTIMIZATION_REMAINING)
+            putProfile(this, PENDING_PROFILE, profile)
         }
     }
 
-    fun updateOptimizationProgress(progressPercent: Int, detail: String) {
+    fun updateOptimizationProgress(
+        progressPercent: Int,
+        detail: String,
+        remainingMs: Long? = null
+    ) {
         preferences.edit {
             putString(KEY_OPTIMIZATION_STATUS, OptimizationStatus.RUNNING.name)
             putInt(KEY_OPTIMIZATION_PROGRESS, progressPercent.coerceIn(0, 100))
             putString(KEY_OPTIMIZATION_DETAIL, detail)
-            putLong(KEY_OPTIMIZATION_HEARTBEAT, System.currentTimeMillis())
+            if (remainingMs != null) putLong(KEY_OPTIMIZATION_REMAINING, remainingMs)
+            else remove(KEY_OPTIMIZATION_REMAINING)
         }
     }
 
-    fun touchOptimizationHeartbeat() {
-        if (preferences.getString(KEY_OPTIMIZATION_STATUS, null) != OptimizationStatus.RUNNING.name) {
-            return
-        }
-        preferences.edit { putLong(KEY_OPTIMIZATION_HEARTBEAT, System.currentTimeMillis()) }
-    }
-
-    fun reconcileInterruptedOptimization(
-        nowWallMs: Long = System.currentTimeMillis(),
-        staleAfterMs: Long = OPTIMIZATION_HEARTBEAT_TIMEOUT_MS,
-    ): Boolean {
-        if (preferences.getString(KEY_OPTIMIZATION_STATUS, null) != OptimizationStatus.RUNNING.name) {
+    fun reconcileInterruptedOptimization(): Boolean {
+        if (preferences.getString(
+                KEY_OPTIMIZATION_STATUS,
+                null
+            ) != OptimizationStatus.RUNNING.name
+        ) {
             return false
         }
-        val heartbeat = preferences.getLong(KEY_OPTIMIZATION_HEARTBEAT, 0L)
-        if (heartbeat > 0L && abs(nowWallMs - heartbeat) <= staleAfterMs) return false
+        if (OptimizationService.serviceAlive) return false
         val savedFileReady = preferences.getString(KEY_OPTIMIZED_PATH, null)
             ?.let { File(it).isFile && File(it).length() > 0L } == true &&
-            storedOptimizationProfile() != null
+                storedProfile(SAVED_PROFILE) != null
         preferences.edit {
             putString(
                 KEY_OPTIMIZATION_STATUS,
@@ -303,8 +260,7 @@ class PlaybackRepository(context: Context) {
                     "Optimization was interrupted; try again"
                 },
             )
-            remove(KEY_OPTIMIZATION_HEARTBEAT)
-            clearPendingOptimization(this)
+            clearProfile(this, PENDING_PROFILE)
         }
         File(appContext.filesDir, OPTIMIZED_DIRECTORY)
             .listFiles { file -> file.name.endsWith(".partial") }
@@ -314,13 +270,16 @@ class PlaybackRepository(context: Context) {
 
     fun isOptimizationRunning(): Boolean {
         reconcileInterruptedOptimization()
-        return preferences.getString(KEY_OPTIMIZATION_STATUS, null) == OptimizationStatus.RUNNING.name
+        return preferences.getString(
+            KEY_OPTIMIZATION_STATUS,
+            null
+        ) == OptimizationStatus.RUNNING.name
     }
 
     fun savedOptimization(currentProfile: OptimizationProfile?): SavedOptimization? {
         val path = preferences.getString(KEY_OPTIMIZED_PATH, null) ?: return null
         val file = File(path).takeIf { it.isFile && it.length() > 0L } ?: return null
-        val savedProfile = storedOptimizationProfile() ?: return null
+        val savedProfile = storedProfile(SAVED_PROFILE) ?: return null
         return SavedOptimization(
             status = if (currentProfile?.signature == savedProfile.signature) {
                 OptimizationStatus.READY
@@ -348,9 +307,8 @@ class PlaybackRepository(context: Context) {
             )
             putString(KEY_OPTIMIZED_PATH, saved.outputPath)
             putLong(KEY_OPTIMIZED_SIZE, file.length())
-            remove(KEY_OPTIMIZATION_HEARTBEAT)
-            clearPendingOptimization(this)
-            putOptimizationProfile(this, saved.profile)
+            clearProfile(this, PENDING_PROFILE)
+            putProfile(this, SAVED_PROFILE, saved.profile)
         }
     }
 
@@ -361,9 +319,8 @@ class PlaybackRepository(context: Context) {
             putString(KEY_OPTIMIZATION_DETAIL, "Optimized copy is active")
             putString(KEY_OPTIMIZED_PATH, output.absolutePath)
             putLong(KEY_OPTIMIZED_SIZE, output.length())
-            remove(KEY_OPTIMIZATION_HEARTBEAT)
-            clearPendingOptimization(this)
-            putOptimizationProfile(this, profile)
+            clearProfile(this, PENDING_PROFILE)
+            putProfile(this, SAVED_PROFILE, profile)
         }
     }
 
@@ -374,8 +331,7 @@ class PlaybackRepository(context: Context) {
                 if (cancelled) OptimizationStatus.CANCELLED.name else OptimizationStatus.FAILED.name,
             )
             putString(KEY_OPTIMIZATION_DETAIL, detail)
-            remove(KEY_OPTIMIZATION_HEARTBEAT)
-            clearPendingOptimization(this)
+            clearProfile(this, PENDING_PROFILE)
         }
     }
 
@@ -383,7 +339,10 @@ class PlaybackRepository(context: Context) {
         preferences.getString(KEY_OPTIMIZED_PATH, null)?.let { path ->
             val file = File(path)
             val optimizedRoot = File(appContext.filesDir, OPTIMIZED_DIRECTORY)
-            if (runCatching { file.canonicalPath.startsWith(optimizedRoot.canonicalPath) }.getOrDefault(false)) {
+            if (runCatching { file.canonicalPath.startsWith(optimizedRoot.canonicalPath) }.getOrDefault(
+                    false
+                )
+            ) {
                 runCatching { file.delete() }
             }
         }
@@ -427,45 +386,27 @@ class PlaybackRepository(context: Context) {
         ) return
         val uri = videoUri() ?: return
         runCatching { readMetadata(uri) }.getOrNull()?.let { metadata ->
+            if (videoUri() != uri) return
             preferences.edit {
                 if (metadata.width > 0 && metadata.height > 0) {
                     putInt(KEY_VIDEO_WIDTH, metadata.width)
                     putInt(KEY_VIDEO_HEIGHT, metadata.height)
                 }
                 if (metadata.frameRate > 0f) putFloat(KEY_SOURCE_FRAME_RATE, metadata.frameRate)
-                putInt(KEY_METADATA_VERSION, CURRENT_METADATA_VERSION)
-                putLong(KEY_SOURCE_FILE_SIZE, metadata.diagnostics.fileSizeBytes)
-                putLong(KEY_SOURCE_LAST_MODIFIED, metadata.diagnostics.lastModifiedMs)
-                putString(KEY_CONTAINER_MIME, metadata.diagnostics.containerMime)
-                putString(KEY_VIDEO_MIME, metadata.diagnostics.videoMime)
-                putInt(KEY_VIDEO_BITRATE, metadata.diagnostics.videoBitrate)
-                putInt(KEY_VIDEO_ROTATION, metadata.diagnostics.rotationDegrees)
-                putInt(KEY_AUDIO_TRACK_COUNT, metadata.diagnostics.audioTrackCount)
-                putInt(KEY_SUBTITLE_TRACK_COUNT, metadata.diagnostics.subtitleTrackCount)
-                putBoolean(KEY_HDR, metadata.diagnostics.hdr)
-                putBoolean(KEY_SEEKABLE, metadata.diagnostics.seekable)
-                putString(KEY_PROVIDER, metadata.diagnostics.provider)
-                putString(KEY_HARDWARE_DECODER, metadata.diagnostics.hardwareDecoder)
+                putInputDiagnostics(this, metadata.diagnostics)
             }
         }
     }
 
     fun setFrameRate(frameRate: FrameRateOption) {
         if (frameRate in PlaybackOptions.frameRates) {
-            preferences.edit {
-                putString(KEY_FRAME_RATE_MODE, frameRate.id)
-                frameRate.fixedFps?.let { putInt(KEY_FPS, it) }
-            }
+            preferences.edit { putString(KEY_FRAME_RATE_MODE, frameRate.id) }
         }
     }
 
     fun setResolution(resolution: ResolutionOption) {
         if (resolution in PlaybackOptions.resolutions) {
-            preferences.edit {
-                putInt(KEY_WIDTH, resolution.width)
-                putInt(KEY_HEIGHT, resolution.height)
-                putInt(KEY_AUTO_SCALE, resolution.autoScalePercent ?: 0)
-            }
+            preferences.edit { putInt(KEY_AUTO_SCALE, resolution.autoScalePercent) }
         }
     }
 
@@ -480,30 +421,11 @@ class PlaybackRepository(context: Context) {
     }
 
     @Synchronized
-    fun setCrop(edge: CropEdge, pixels: Int) {
-        val current = CropInsets(
-            top = preferences.getInt(KEY_CROP_TOP, 0),
-            right = preferences.getInt(KEY_CROP_RIGHT, 0),
-            bottom = preferences.getInt(KEY_CROP_BOTTOM, 0),
-            left = preferences.getInt(KEY_CROP_LEFT, 0),
+    fun setCropInsets(insets: CropInsets) {
+        val updated = insets.clamped(
+            preferences.getInt(KEY_VIDEO_WIDTH, 0),
+            preferences.getInt(KEY_VIDEO_HEIGHT, 0),
         )
-        val frameWidth = preferences.getInt(KEY_VIDEO_WIDTH, 0)
-        val frameHeight = preferences.getInt(KEY_VIDEO_HEIGHT, 0)
-        val requested = pixels.coerceAtLeast(0)
-        val updated = when (edge) {
-            CropEdge.TOP -> current.copy(
-                top = requested.coerceToAvailable(frameHeight, current.bottom),
-            )
-            CropEdge.RIGHT -> current.copy(
-                right = requested.coerceToAvailable(frameWidth, current.left),
-            )
-            CropEdge.BOTTOM -> current.copy(
-                bottom = requested.coerceToAvailable(frameHeight, current.top),
-            )
-            CropEdge.LEFT -> current.copy(
-                left = requested.coerceToAvailable(frameWidth, current.right),
-            )
-        }.clamped(frameWidth, frameHeight)
         preferences.edit {
             putInt(KEY_CROP_TOP, updated.top)
             putInt(KEY_CROP_RIGHT, updated.right)
@@ -512,9 +434,70 @@ class PlaybackRepository(context: Context) {
         }
     }
 
-    private fun Int.coerceToAvailable(frameSize: Int, opposingCrop: Int): Int {
-        if (frameSize <= 2) return this
-        return coerceAtMost((frameSize - opposingCrop.coerceAtLeast(0) - 2).coerceAtLeast(0))
+    fun previewFrame(positionMs: Long, maxSize: Int, exact: Boolean = false): Bitmap? =
+        withRetriever { retriever ->
+            retriever.frame(positionMs, maxSize, exact)
+        }
+
+    fun detectBlackBars(): CropInsets? {
+        val snapshot = snapshot()
+        if (snapshot.videoWidth <= 0 || snapshot.videoHeight <= 0) return null
+        val bars = withRetriever { retriever ->
+            (1..BAR_SAMPLE_COUNT).mapNotNull { sample ->
+                val positionMs = snapshot.trimStartMs +
+                        (snapshot.trimEndMs - snapshot.trimStartMs) * sample / (BAR_SAMPLE_COUNT + 1)
+                val frame = retriever.frame(positionMs, BAR_SAMPLE_SIZE_PX, exact = false)
+                    ?: return@mapNotNull null
+                val pixels = IntArray(frame.width * frame.height)
+                frame.getPixels(pixels, 0, frame.width, 0, 0, frame.width, frame.height)
+                BlackBarDetector.detect(pixels, frame.width, frame.height)?.let {
+                    BlackBarDetector.scale(
+                        it,
+                        frame.width,
+                        frame.height,
+                        snapshot.videoWidth,
+                        snapshot.videoHeight
+                    )
+                }.also { frame.recycle() }
+            }
+        } ?: return null
+        return BlackBarDetector.combine(bars)?.clamped(snapshot.videoWidth, snapshot.videoHeight)
+    }
+
+    private fun <T> withRetriever(block: (MediaMetadataRetriever) -> T): T? {
+        val uri = videoUri() ?: return null
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(appContext, uri)
+            block(retriever)
+        } catch (_: RuntimeException) {
+            null
+        } finally {
+            runCatching { retriever.release() }
+        }
+    }
+
+    private fun MediaMetadataRetriever.frame(
+        positionMs: Long,
+        maxSize: Int,
+        exact: Boolean
+    ): Bitmap? {
+        val frame = getScaledFrameAtTime(
+            positionMs.coerceAtLeast(0L) * 1_000L,
+            if (exact) MediaMetadataRetriever.OPTION_CLOSEST else MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+            maxSize,
+            maxSize,
+        ) ?: return null
+        val videoLandscape =
+            preferences.getInt(KEY_VIDEO_WIDTH, 0) > preferences.getInt(KEY_VIDEO_HEIGHT, 0)
+        val rotation = preferences.getInt(KEY_VIDEO_ROTATION, 0)
+        if (frame.width == frame.height || (frame.width > frame.height) == videoLandscape || rotation == 0) {
+            return frame
+        }
+        return Bitmap.createBitmap(
+            frame, 0, 0, frame.width, frame.height,
+            Matrix().apply { postRotate(rotation.toFloat()) }, true
+        ).also { frame.recycle() }
     }
 
     fun setAudioEnabled(enabled: Boolean) {
@@ -581,39 +564,20 @@ class PlaybackRepository(context: Context) {
         preferences.edit {
             putString(KEY_STATUS, status.name)
             putString(KEY_STATUS_DETAIL, detail)
-            if (status in ACTIVE_PLAYBACK_STATUSES) {
-                putLong(KEY_PLAYBACK_HEARTBEAT, System.currentTimeMillis())
-            } else {
-                remove(KEY_PLAYBACK_HEARTBEAT)
-            }
         }
     }
 
-    fun touchPlaybackHeartbeat() {
-        val status = preferences.getString(KEY_STATUS, null)
-            ?.let { runCatching { PlaybackStatus.valueOf(it) }.getOrNull() }
-        if (status !in ACTIVE_PLAYBACK_STATUSES) return
-        preferences.edit { putLong(KEY_PLAYBACK_HEARTBEAT, System.currentTimeMillis()) }
-    }
-
-    fun reconcileInterruptedPlayback(
-        nowWallMs: Long = System.currentTimeMillis(),
-        staleAfterMs: Long = PLAYBACK_HEARTBEAT_TIMEOUT_MS,
-    ): Boolean {
-        val status = preferences.getString(KEY_STATUS, null)
-            ?.let { runCatching { PlaybackStatus.valueOf(it) }.getOrNull() }
+    fun reconcileInterruptedPlayback(): Boolean {
         if (
-            status !in ACTIVE_PLAYBACK_STATUSES ||
+            !storedEnum(KEY_STATUS, PlaybackStatus.IDLE).isActive ||
             !preferences.getBoolean(KEY_TIMELINE_RUNNING, true)
         ) {
             return false
         }
-        val heartbeat = preferences.getLong(KEY_PLAYBACK_HEARTBEAT, 0L)
-        if (heartbeat > 0L && abs(nowWallMs - heartbeat) <= staleAfterMs) return false
+        if (PlaybackController.serviceAlive || OptimizationService.serviceAlive) return false
         preferences.edit {
             putString(KEY_STATUS, PlaybackStatus.IDLE.name)
-            putString(KEY_STATUS_DETAIL, "Playback service stopped; timeline still advances")
-            remove(KEY_PLAYBACK_HEARTBEAT)
+            putString(KEY_STATUS_DETAIL, "Playback interrupted; waiting to reconnect")
         }
         return true
     }
@@ -668,12 +632,15 @@ class PlaybackRepository(context: Context) {
             retriever.setDataSource(appContext, uri)
             val duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                 ?.toLongOrNull() ?: 0L
-            val rawWidth = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-                ?.toIntOrNull() ?: 0
-            val rawHeight = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                ?.toIntOrNull() ?: 0
-            val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
-                ?.toIntOrNull() ?: 0
+            val rawWidth =
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                    ?.toIntOrNull() ?: 0
+            val rawHeight =
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                    ?.toIntOrNull() ?: 0
+            val rotation =
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                    ?.toIntOrNull() ?: 0
             val rotated = rotation == 90 || rotation == 270
             VideoMetadata(
                 durationMs = duration,
@@ -734,8 +701,9 @@ class PlaybackRepository(context: Context) {
                         rotation = format.intOr(MediaFormat.KEY_ROTATION, 0)
                         val transfer = format.intOr(MediaFormat.KEY_COLOR_TRANSFER, 0)
                         hdr = transfer == MediaFormat.COLOR_TRANSFER_ST2084 ||
-                            transfer == MediaFormat.COLOR_TRANSFER_HLG
+                                transfer == MediaFormat.COLOR_TRANSFER_HLG
                     }
+
                     mime.startsWith("audio/") -> audioTracks++
                     mime.isNotBlank() -> subtitleTracks++
                 }
@@ -837,7 +805,7 @@ class PlaybackRepository(context: Context) {
         return runCatching {
             MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.firstOrNull { info ->
                 !info.isEncoder && info.isHardwareAccelerated &&
-                    info.supportedTypes.any { it.equals(mime, ignoreCase = true) }
+                        info.supportedTypes.any { it.equals(mime, ignoreCase = true) }
             }?.name.orEmpty()
         }.getOrDefault("")
     }
@@ -873,88 +841,66 @@ class PlaybackRepository(context: Context) {
         -1
     }
 
-    private fun storedOptimizationProfile(): OptimizationProfile? {
-        val signature = preferences.getString(KEY_OPTIMIZED_SIGNATURE, null) ?: return null
-        val width = preferences.getInt(KEY_OPTIMIZED_WIDTH, 0)
-        val height = preferences.getInt(KEY_OPTIMIZED_HEIGHT, 0)
-        val fps = preferences.getFloat(KEY_OPTIMIZED_FPS, 0f)
+    private inline fun <reified T : Enum<T>> storedEnum(key: String, fallback: T): T =
+        preferences.getString(key, null)
+            ?.let { runCatching { enumValueOf<T>(it) }.getOrNull() }
+            ?: fallback
+
+    private fun putInputDiagnostics(editor: SharedPreferences.Editor, diagnostics: InputVideoDiagnostics) {
+        editor.putInt(KEY_METADATA_VERSION, CURRENT_METADATA_VERSION)
+        editor.putLong(KEY_SOURCE_FILE_SIZE, diagnostics.fileSizeBytes)
+        editor.putLong(KEY_SOURCE_LAST_MODIFIED, diagnostics.lastModifiedMs)
+        editor.putString(KEY_CONTAINER_MIME, diagnostics.containerMime)
+        editor.putString(KEY_VIDEO_MIME, diagnostics.videoMime)
+        editor.putInt(KEY_VIDEO_BITRATE, diagnostics.videoBitrate)
+        editor.putInt(KEY_VIDEO_ROTATION, diagnostics.rotationDegrees)
+        editor.putInt(KEY_AUDIO_TRACK_COUNT, diagnostics.audioTrackCount)
+        editor.putInt(KEY_SUBTITLE_TRACK_COUNT, diagnostics.subtitleTrackCount)
+        editor.putBoolean(KEY_HDR, diagnostics.hdr)
+        editor.putBoolean(KEY_SEEKABLE, diagnostics.seekable)
+        editor.putString(KEY_PROVIDER, diagnostics.provider)
+        editor.putString(KEY_HARDWARE_DECODER, diagnostics.hardwareDecoder)
+    }
+    private fun storedProfile(prefix: String): OptimizationProfile? {
+        val signature = preferences.getString("${prefix}signature", null) ?: return null
+        val width = preferences.getInt("${prefix}width", 0)
+        val height = preferences.getInt("${prefix}height", 0)
+        val fps = preferences.getFloat("${prefix}fps", 0f)
         if (width <= 0 || height <= 0 || fps <= 0f) return null
         return OptimizationProfile(
             signature = signature,
             outputWidth = width,
             outputHeight = height,
             targetFps = fps,
-            videoBitrate = preferences.getInt(KEY_OPTIMIZED_BITRATE, 0),
-            estimatedBytes = preferences.getLong(KEY_OPTIMIZED_ESTIMATED_SIZE, 0L),
+            videoBitrate = preferences.getInt("${prefix}bitrate", 0),
+            estimatedBytes = preferences.getLong("${prefix}estimated_size", 0L),
         )
     }
 
-    private fun putOptimizationProfile(
-        editor: android.content.SharedPreferences.Editor,
-        profile: OptimizationProfile,
-    ) {
-        editor.putString(KEY_OPTIMIZED_SIGNATURE, profile.signature)
-        editor.putInt(KEY_OPTIMIZED_WIDTH, profile.outputWidth)
-        editor.putInt(KEY_OPTIMIZED_HEIGHT, profile.outputHeight)
-        editor.putFloat(KEY_OPTIMIZED_FPS, profile.targetFps)
-        editor.putInt(KEY_OPTIMIZED_BITRATE, profile.videoBitrate)
-        editor.putLong(KEY_OPTIMIZED_ESTIMATED_SIZE, profile.estimatedBytes)
+    private fun putProfile(editor: SharedPreferences.Editor, prefix: String, profile: OptimizationProfile) {
+        editor.putString("${prefix}signature", profile.signature)
+        editor.putInt("${prefix}width", profile.outputWidth)
+        editor.putInt("${prefix}height", profile.outputHeight)
+        editor.putFloat("${prefix}fps", profile.targetFps)
+        editor.putInt("${prefix}bitrate", profile.videoBitrate)
+        editor.putLong("${prefix}estimated_size", profile.estimatedBytes)
     }
 
-    private fun storedPendingOptimizationProfile(): OptimizationProfile? {
-        val signature = preferences.getString(KEY_PENDING_OPTIMIZED_SIGNATURE, null) ?: return null
-        val width = preferences.getInt(KEY_PENDING_OPTIMIZED_WIDTH, 0)
-        val height = preferences.getInt(KEY_PENDING_OPTIMIZED_HEIGHT, 0)
-        val fps = preferences.getFloat(KEY_PENDING_OPTIMIZED_FPS, 0f)
-        if (width <= 0 || height <= 0 || fps <= 0f) return null
-        return OptimizationProfile(
-            signature = signature,
-            outputWidth = width,
-            outputHeight = height,
-            targetFps = fps,
-            videoBitrate = preferences.getInt(KEY_PENDING_OPTIMIZED_BITRATE, 0),
-            estimatedBytes = preferences.getLong(KEY_PENDING_OPTIMIZED_ESTIMATED_SIZE, 0L),
-        )
+    private fun clearProfile(editor: SharedPreferences.Editor, prefix: String) {
+        PROFILE_FIELDS.forEach { editor.remove("$prefix$it") }
     }
 
-    private fun putPendingOptimizationProfile(
-        editor: android.content.SharedPreferences.Editor,
-        profile: OptimizationProfile,
-    ) {
-        editor.putString(KEY_PENDING_OPTIMIZED_SIGNATURE, profile.signature)
-        editor.putInt(KEY_PENDING_OPTIMIZED_WIDTH, profile.outputWidth)
-        editor.putInt(KEY_PENDING_OPTIMIZED_HEIGHT, profile.outputHeight)
-        editor.putFloat(KEY_PENDING_OPTIMIZED_FPS, profile.targetFps)
-        editor.putInt(KEY_PENDING_OPTIMIZED_BITRATE, profile.videoBitrate)
-        editor.putLong(KEY_PENDING_OPTIMIZED_ESTIMATED_SIZE, profile.estimatedBytes)
-    }
-
-    private fun clearPendingOptimization(editor: android.content.SharedPreferences.Editor) {
-        editor.remove(KEY_PENDING_OPTIMIZED_SIGNATURE)
-        editor.remove(KEY_PENDING_OPTIMIZED_WIDTH)
-        editor.remove(KEY_PENDING_OPTIMIZED_HEIGHT)
-        editor.remove(KEY_PENDING_OPTIMIZED_FPS)
-        editor.remove(KEY_PENDING_OPTIMIZED_BITRATE)
-        editor.remove(KEY_PENDING_OPTIMIZED_ESTIMATED_SIZE)
-    }
-
-    private fun clearOptimization(editor: android.content.SharedPreferences.Editor) {
+    private fun clearOptimization(editor: SharedPreferences.Editor) {
         editor.remove(KEY_OPTIMIZATION_STATUS)
         editor.remove(KEY_OPTIMIZATION_PROGRESS)
         editor.remove(KEY_OPTIMIZATION_DETAIL)
-        editor.remove(KEY_OPTIMIZATION_HEARTBEAT)
         editor.remove(KEY_OPTIMIZED_PATH)
         editor.remove(KEY_OPTIMIZED_SIZE)
-        editor.remove(KEY_OPTIMIZED_SIGNATURE)
-        editor.remove(KEY_OPTIMIZED_WIDTH)
-        editor.remove(KEY_OPTIMIZED_HEIGHT)
-        editor.remove(KEY_OPTIMIZED_FPS)
-        editor.remove(KEY_OPTIMIZED_BITRATE)
-        editor.remove(KEY_OPTIMIZED_ESTIMATED_SIZE)
-        clearPendingOptimization(editor)
+        clearProfile(editor, SAVED_PROFILE)
+        clearProfile(editor, PENDING_PROFILE)
     }
 
-    private fun clearRuntime(editor: android.content.SharedPreferences.Editor) {
+    private fun clearRuntime(editor: SharedPreferences.Editor) {
         editor.remove(KEY_RUNTIME_DECODED)
         editor.remove(KEY_RUNTIME_SELECTED)
         editor.remove(KEY_RUNTIME_PUBLISHED)
@@ -988,6 +934,8 @@ class PlaybackRepository(context: Context) {
         private const val MIN_FRAME_RATE_SAMPLES = 48
         private const val FRAME_RATE_SAMPLE_SPAN_US = 12_000_000L
         private const val MIN_TRIM_DURATION_MS = 1_000L
+        private const val BAR_SAMPLE_COUNT = 9
+        private const val BAR_SAMPLE_SIZE_PX = 640
         private const val KEY_SOURCE_FILE_SIZE = "source_file_size"
         private const val KEY_SOURCE_LAST_MODIFIED = "source_last_modified"
         private const val KEY_CONTAINER_MIME = "container_mime"
@@ -1009,10 +957,7 @@ class PlaybackRepository(context: Context) {
         private const val KEY_ANCHOR_WALL = "anchor_wall_ms"
         private const val KEY_ANCHOR_BOOT = "anchor_boot_count"
         private const val KEY_TIMELINE_RUNNING = "timeline_running"
-        private const val KEY_FPS = "fps"
         private const val KEY_FRAME_RATE_MODE = "frame_rate_mode"
-        private const val KEY_WIDTH = "width"
-        private const val KEY_HEIGHT = "height"
         private const val KEY_AUTO_SCALE = "auto_scale"
         private const val KEY_UPSCALE_FILTER = "upscale_filter"
         private const val KEY_DOWNSCALE_FILTER = "downscale_filter"
@@ -1022,25 +967,12 @@ class PlaybackRepository(context: Context) {
         private const val KEY_WIDGET_TAP_ACTION = "widget_tap_action"
         private const val KEY_STATUS = "status"
         private const val KEY_STATUS_DETAIL = "status_detail"
-        private const val KEY_PLAYBACK_HEARTBEAT = "playback_heartbeat"
         private const val KEY_OPTIMIZATION_STATUS = "optimization_status"
         private const val KEY_OPTIMIZATION_PROGRESS = "optimization_progress"
+        private const val KEY_OPTIMIZATION_REMAINING = "optimization_remaining_ms"
         private const val KEY_OPTIMIZATION_DETAIL = "optimization_detail"
-        private const val KEY_OPTIMIZATION_HEARTBEAT = "optimization_heartbeat"
         private const val KEY_OPTIMIZED_PATH = "optimized_path"
         private const val KEY_OPTIMIZED_SIZE = "optimized_size"
-        private const val KEY_OPTIMIZED_SIGNATURE = "optimized_signature"
-        private const val KEY_OPTIMIZED_WIDTH = "optimized_width"
-        private const val KEY_OPTIMIZED_HEIGHT = "optimized_height"
-        private const val KEY_OPTIMIZED_FPS = "optimized_fps"
-        private const val KEY_OPTIMIZED_BITRATE = "optimized_bitrate"
-        private const val KEY_OPTIMIZED_ESTIMATED_SIZE = "optimized_estimated_size"
-        private const val KEY_PENDING_OPTIMIZED_SIGNATURE = "pending_optimized_signature"
-        private const val KEY_PENDING_OPTIMIZED_WIDTH = "pending_optimized_width"
-        private const val KEY_PENDING_OPTIMIZED_HEIGHT = "pending_optimized_height"
-        private const val KEY_PENDING_OPTIMIZED_FPS = "pending_optimized_fps"
-        private const val KEY_PENDING_OPTIMIZED_BITRATE = "pending_optimized_bitrate"
-        private const val KEY_PENDING_OPTIMIZED_ESTIMATED_SIZE = "pending_optimized_estimated_size"
         private const val KEY_RUNTIME_DECODED = "runtime_decoded"
         private const val KEY_RUNTIME_SELECTED = "runtime_selected"
         private const val KEY_RUNTIME_PUBLISHED = "runtime_published"
@@ -1056,14 +988,10 @@ class PlaybackRepository(context: Context) {
         private const val KEY_RUNTIME_AUDIO_STATE = "runtime_audio_state"
         private const val KEY_RUNTIME_SAMPLE_ELAPSED = "runtime_sample_elapsed"
         private const val KEY_RUNTIME_ACTIVE = "runtime_active"
-        const val OPTIMIZATION_HEARTBEAT_TIMEOUT_MS = 15_000L
-        private const val PLAYBACK_HEARTBEAT_TIMEOUT_MS = 5_000L
+        private const val SAVED_PROFILE = "optimized_"
+        private const val PENDING_PROFILE = "pending_optimized_"
+        private val PROFILE_FIELDS = listOf("signature", "width", "height", "fps", "bitrate", "estimated_size")
         const val OPTIMIZED_DIRECTORY = "optimized"
-        private val ACTIVE_PLAYBACK_STATUSES = setOf(
-            PlaybackStatus.STARTING,
-            PlaybackStatus.RENDERING,
-            PlaybackStatus.SUSPENDED,
-        )
     }
 
     private data class VideoMetadata(

@@ -3,30 +3,33 @@ package com.bludood.homeloop
 import android.app.Application
 import android.appwidget.AppWidgetManager
 import android.content.ComponentName
+import android.graphics.Bitmap
 import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.bludood.homeloop.data.CropInsets
+import com.bludood.homeloop.data.FrameRateOption
+import com.bludood.homeloop.data.HiddenAudioPolicy
+import com.bludood.homeloop.data.OptimizationRecommendation
+import com.bludood.homeloop.data.OptimizationSnapshot
+import com.bludood.homeloop.data.OptimizationStatus
+import com.bludood.homeloop.data.OutputSize
 import com.bludood.homeloop.data.PlaybackRepository
 import com.bludood.homeloop.data.PlaybackSnapshot
 import com.bludood.homeloop.data.PlaybackStatus
-import com.bludood.homeloop.data.FrameRateOption
-import com.bludood.homeloop.data.CropEdge
+import com.bludood.homeloop.data.RenderingPolicy
+import com.bludood.homeloop.data.ResolutionOption
 import com.bludood.homeloop.data.ScalingDirection
 import com.bludood.homeloop.data.ScalingFilter
-import com.bludood.homeloop.data.ResolutionOption
 import com.bludood.homeloop.data.WidgetTapAction
-import com.bludood.homeloop.data.HiddenAudioPolicy
-import com.bludood.homeloop.data.RenderingPolicy
-import com.bludood.homeloop.data.OptimizationSnapshot
-import com.bludood.homeloop.data.OptimizationRecommendation
-import com.bludood.homeloop.data.OutputSize
-import com.bludood.homeloop.data.OptimizationStatus
 import com.bludood.homeloop.playback.AutoResolutionResolver
+import com.bludood.homeloop.playback.BootRecoveryJob
+import com.bludood.homeloop.playback.LauncherVisibilityMonitor
 import com.bludood.homeloop.playback.OptimizationPlanner
 import com.bludood.homeloop.playback.OptimizationService
 import com.bludood.homeloop.playback.PlaybackService
-import com.bludood.homeloop.playback.LauncherVisibilityMonitor
+import com.bludood.homeloop.playback.detail
 import com.bludood.homeloop.widget.VideoWidgetProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -43,6 +46,7 @@ data class MainUiState(
     val optimization: OptimizationSnapshot,
     val optimizationRecommendation: OptimizationRecommendation,
     val usageAccessGranted: Boolean,
+    val backgroundStartAllowed: Boolean,
     val isImporting: Boolean = false,
     val message: String? = null,
 ) {
@@ -70,6 +74,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectVideo(uri: Uri) {
+        if (_uiState.value.isImporting || repository.isOptimizationRunning()) return
         _uiState.value = _uiState.value.copy(isImporting = true)
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) { repository.importVideo(uri) }
@@ -82,8 +87,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             VideoWidgetProvider.updateAll(
                 getApplication(),
-                if (result.isSuccess) "Ready — start playback in the app" else "Choose a video in the app",
+                if (result.isSuccess) "Preparing playback" else repository.snapshot().statusDetail,
             )
+            if (result.isSuccess) {
+                runCatching {
+                    ContextCompat.startForegroundService(
+                        getApplication(),
+                        PlaybackService.intent(
+                            getApplication(),
+                            PlaybackService.Action.ENSURE_RUNNING
+                        )
+                    )
+                }.onFailure { showMessage("Could not start playback: ${it.message}") }
+            }
         }
     }
 
@@ -102,40 +118,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setScalingFilter(direction: ScalingDirection, filter: ScalingFilter) {
         repository.setScalingFilter(direction, filter)
         refresh()
-        val playback = repository.snapshot()
-        when {
-            playback.status in ACTIVE_STATUSES -> restartIfActive()
-            playback.status == PlaybackStatus.PAUSED || !playback.timelineRunning ->
-                renderPausedFrame()
-        }
+        redrawWidget(repository.snapshot())
     }
 
-    fun setCrop(edge: CropEdge, pixels: Int) {
+    fun setCropInsets(insets: CropInsets) {
         val before = repository.snapshot()
-        repository.setCrop(edge, pixels.coerceAtLeast(0))
+        repository.setCropInsets(insets)
         refresh()
-        when {
-            before.status in ACTIVE_STATUSES -> restartIfActive()
-            before.status == PlaybackStatus.PAUSED || !before.timelineRunning ->
-                renderPausedFrame()
-        }
+        redrawWidget(before)
     }
 
     fun setTrimRange(startMs: Long, endMs: Long) {
         val before = repository.snapshot()
         repository.setTrimRange(startMs, endMs)
         refresh()
-        when {
-            before.status in ACTIVE_STATUSES -> restartIfActive()
-            before.status == PlaybackStatus.PAUSED || !before.timelineRunning ->
-                renderPausedFrame()
-        }
+        redrawWidget(before)
     }
 
     fun setAudioEnabled(enabled: Boolean) {
         repository.setAudioEnabled(enabled)
         refresh()
-        if (_uiState.value.playback.status in ACTIVE_STATUSES) {
+        if (_uiState.value.playback.status.isActive) {
             runCatching {
                 getApplication<Application>().startService(
                     PlaybackService.intent(getApplication(), PlaybackService.Action.APPLY_AUDIO),
@@ -177,12 +180,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!before.hasVideo) return
         repository.setPosition(positionMs)
         refresh()
+        redrawWidget(before)
+    }
+    private fun redrawWidget(playback: PlaybackSnapshot) {
         when {
-            before.status in ACTIVE_STATUSES -> restartIfActive()
-            before.status == PlaybackStatus.PAUSED || !before.timelineRunning -> {
-                renderPausedFrame()
-            }
+            playback.status.isActive -> restartIfActive()
+            playback.status == PlaybackStatus.PAUSED || !playback.timelineRunning -> renderPausedFrame()
         }
+    }
+
+    suspend fun previewFrame(maxSize: Int): Bitmap? = withContext(Dispatchers.IO) {
+        repository.previewFrame(repository.snapshot().sourcePositionMs, maxSize)
+    }
+
+    suspend fun frameAt(sourcePositionMs: Long, maxSize: Int): Bitmap? =
+        withContext(Dispatchers.IO) {
+            repository.previewFrame(sourcePositionMs, maxSize, exact = true)
+        }
+
+    suspend fun detectBlackBars(): CropInsets? = withContext(Dispatchers.IO) {
+        repository.detectBlackBars()
     }
 
     private fun renderPausedFrame() {
@@ -235,7 +252,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }.exceptionOrNull()
         if (error != null) {
             repository.setStatus(PlaybackStatus.ERROR, error.message ?: "Could not start playback")
-            showMessage("Could not start playback: ${error.message ?: error.javaClass.simpleName}")
+            showMessage("Could not start playback: ${error.detail}")
         }
         refresh()
     }
@@ -247,7 +264,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val playback = repository.snapshot()
         when {
-            playback.status in ACTIVE_STATUSES && playback.timelineRunning -> {
+            playback.status.isActive && playback.timelineRunning -> {
                 repository.pauseTimeline()
                 runCatching {
                     getApplication<Application>().startService(
@@ -310,7 +327,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun restartIfActive() {
-        if (_uiState.value.playback.status in ACTIVE_STATUSES) {
+        if (_uiState.value.playback.status.isActive) {
             runCatching {
                 getApplication<Application>().startService(
                     PlaybackService.intent(getApplication(), PlaybackService.Action.RESTART),
@@ -320,7 +337,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun applyResourcePolicyIfActive() {
-        if (_uiState.value.playback.status in ACTIVE_STATUSES) {
+        if (_uiState.value.playback.status.isActive) {
             runCatching {
                 getApplication<Application>().startService(
                     PlaybackService.intent(
@@ -356,18 +373,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             optimization = repository.optimizationSnapshot(profile),
             optimizationRecommendation = OptimizationPlanner.recommendation(playback, profile),
             usageAccessGranted = LauncherVisibilityMonitor.hasUsageAccess(getApplication()),
+            backgroundStartAllowed = BootRecoveryJob.canStartInBackground(getApplication()),
         )
     }
 
     private fun showMessage(message: String) {
         _uiState.value = _uiState.value.copy(message = message)
-    }
-
-    companion object {
-        private val ACTIVE_STATUSES = setOf(
-            PlaybackStatus.STARTING,
-            PlaybackStatus.RENDERING,
-            PlaybackStatus.SUSPENDED,
-        )
     }
 }

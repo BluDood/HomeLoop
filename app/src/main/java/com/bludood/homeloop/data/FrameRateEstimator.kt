@@ -1,10 +1,5 @@
 package com.bludood.homeloop.data
 
-/** Estimates the video's nominal cadence from presentation timestamps.
- *
- * Container frame-rate fields are frequently rounded (notably 23 for 23.976 FPS in MKV).
- * Sorting also makes the estimate tolerant of presentation timestamps stored in decode order.
- */
 internal object FrameRateEstimator {
     fun estimate(presentationTimesUs: Iterable<Long>): Float {
         val orderedTimes = presentationTimesUs
@@ -23,8 +18,6 @@ internal object FrameRateEstimator {
             it >= median * INLIER_LOWER_BOUND && it <= median * INLIER_UPPER_BOUND
         }
         if (inliers.size < MIN_INTERVAL_COUNT) return 0f
-
-        // The inlier mean preserves fractional NTSC rates better than an integer metadata field.
         val meanIntervalUs = inliers.average()
         val fps = (MICROSECONDS_PER_SECOND / meanIntervalUs).toFloat()
         return fps.takeIf { it in MIN_REASONABLE_FPS..MAX_REASONABLE_FPS } ?: 0f
